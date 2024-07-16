@@ -6,7 +6,7 @@ from torch import nn, Tensor
 
 from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
 
-
+'''
 class Block(nn.Module):
     def __init__(
         self, dim, mixer_cls, mlp_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False
@@ -86,6 +86,52 @@ class Block(nn.Module):
             hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
+
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+
+'''
+class Block(nn.Module):
+    def __init__(
+        self, dim, mixer_cls, mlp_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False
+    ):
+        """
+        Simple block wrapping a mixer class with LayerNorm/RMSNorm and residual connection"
+
+        This Block has a slightly different structure compared to a regular
+        prenorm Transformer block.
+        The standard block is: LN -> MHA/MLP -> Add.
+        [Ref: https://arxiv.org/abs/2002.04745]
+        Here we have: Add -> LN -> Mixer, returning both
+        the hidden_states (output of the mixer) and the residual.
+        This is purely for performance reasons, as we can fuse add and LayerNorm.
+        The residual needs to be provided (except for the very first block).
+        """
+        super().__init__()       
+        self.norm = norm_cls(dim)
+        self.mixer = mixer_cls(dim)
+        if mlp_cls is not nn.Identity:
+            self.norm2 = norm_cls(dim)
+            self.mlp = mlp_cls(dim)
+        else:
+            self.mlp = None
+        dropout = 0.1
+        self.dropout = nn.Dropout(dropout)
+
+       
+
+    def forward(
+            self, hidden_states: Tensor,  inference_params=None, **mixer_kwargs
+    ):
+        r"""Pass the input through the encoder layer.
+
+        Args:
+            hidden_states: the sequence to the encoder layer (required).
+            residual: hidden_states = Mixer(LN(residual))
+        """
+        hidden_states = hidden_states +  self.dropout(self.mixer( self.norm(hidden_states), inference_params=inference_params, **mixer_kwargs))
+        hidden_states = hidden_states +  self.dropout(self.mlp(self.norm2(hidden_states)))
+        return hidden_states
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
