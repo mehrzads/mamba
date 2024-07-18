@@ -129,8 +129,9 @@ class Block(nn.Module):
             hidden_states: the sequence to the encoder layer (required).
             residual: hidden_states = Mixer(LN(residual))
         """
-        hidden_states = hidden_states +  self.dropout(self.mixer( self.norm(hidden_states), inference_params=inference_params, **mixer_kwargs))
-        hidden_states = hidden_states +  self.dropout(self.mlp(self.norm2(hidden_states)))
+        fc_factor = 1
+        hidden_states = hidden_states +  self.dropout(fc_factor * self.mixer( self.norm(hidden_states), inference_params=inference_params, **mixer_kwargs))
+        hidden_states = hidden_states +  self.dropout(fc_factor * self.mlp(self.norm2(hidden_states)))
         return hidden_states
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
