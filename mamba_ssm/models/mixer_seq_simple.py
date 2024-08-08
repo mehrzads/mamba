@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from mamba_ssm.models.config_mamba import MambaConfig
-from mamba_ssm.modules.mamba_simple import Mamba
+from mamba_ssm.modules.mamba_simple import Mamba, MambaVision
 from mamba_ssm.modules.mamba2 import Mamba2
 from mamba_ssm.modules.mha import MHA
 from mamba_ssm.modules.mlp import GatedMLP
@@ -24,6 +24,7 @@ try:
     from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
+from timm.models.vision_transformer import Mlp
 
 
 def create_block(
@@ -36,6 +37,9 @@ def create_block(
     rms_norm=False,
     residual_in_fp32=False,
     fused_add_norm=False,
+    gated_mlp = True,
+    mlp_ratio = 2,
+    fc_factor = 1,
     layer_idx=None,
     device=None,
     dtype=None,
@@ -47,36 +51,49 @@ def create_block(
     if attn_cfg is None:
         attn_cfg = {}
     factory_kwargs = {"device": device, "dtype": dtype}
+    
     if layer_idx not in attn_layer_idx:
         # Create a copy of the config to modify
         ssm_cfg = copy.deepcopy(ssm_cfg) if ssm_cfg is not None else {}
         ssm_layer = ssm_cfg.pop("layer", "Mamba1")
-        if ssm_layer not in ["Mamba1", "Mamba2"]:
-            raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1 and Mamba2")
+        if ssm_layer not in ["Mamba1", "Mamba2", "MambaVision"]:
+            raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1, Mamba2, and MambaVision ")
         mixer_cls = partial(
-            Mamba2 if ssm_layer == "Mamba2" else Mamba,
+            Mamba2 if ssm_layer == "Mamba2" else  Mamba if ssm_layer == "Mamba" else MambaVision,
             layer_idx=layer_idx,
             **ssm_cfg,
             **factory_kwargs
         )
     else:
         mixer_cls = partial(MHA, layer_idx=layer_idx, **attn_cfg, **factory_kwargs)
+        
     norm_cls = partial(
         nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon, **factory_kwargs
-    )
+    )    
+    dropout = 0.1
+    drop_cls = nn.Dropout(dropout)
+    
     if d_intermediate == 0:
-        mlp_cls = nn.Identity
+        mlp_cls = nn.Identity     
     else:
-        mlp_cls = partial(
-            GatedMLP, hidden_features=d_intermediate, out_features=d_model, **factory_kwargs
-        )
+        if (gated_mlp):
+            mlp_cls = partial(
+                GatedMLP, hidden_features=d_intermediate, out_features=d_model, **factory_kwargs
+            )
+        else:
+            mlp_hidden_dim = int(d_model * mlp_ratio)
+            act_layer=nn.GELU        
+            mlp_cls = partial(
+                Mlp,  hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=dropout)    
     block = Block(
         d_model,
         mixer_cls,
         mlp_cls,
         norm_cls=norm_cls,
+        drop_cls=drop_cls,
         fused_add_norm=fused_add_norm,
         residual_in_fp32=residual_in_fp32,
+        fc_factor = fc_factor
     )
     block.layer_idx = layer_idx
     return block

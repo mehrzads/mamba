@@ -93,7 +93,7 @@ class Block(nn.Module):
 '''
 class Block(nn.Module):
     def __init__(
-        self, dim, mixer_cls, mlp_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False
+        self, dim, mixer_cls, mlp_cls, norm_cls=nn.LayerNorm, drop_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False, fc_factor = 1
     ):
         """
         Simple block wrapping a mixer class with LayerNorm/RMSNorm and residual connection"
@@ -108,15 +108,12 @@ class Block(nn.Module):
         The residual needs to be provided (except for the very first block).
         """
         super().__init__()       
+        self.fc_factor = fc_factor
         self.norm = norm_cls(dim)
         self.mixer = mixer_cls(dim)
-        if mlp_cls is not nn.Identity:
-            self.norm2 = norm_cls(dim)
-            self.mlp = mlp_cls(dim)
-        else:
-            self.mlp = None
-        dropout = 0.1
-        self.dropout = nn.Dropout(dropout)
+        self.norm2 = norm_cls(dim)
+        self.mlp = mlp_cls(dim)                     
+        self.dropout = drop_cls
 
        
 
@@ -129,10 +126,9 @@ class Block(nn.Module):
             hidden_states: the sequence to the encoder layer (required).
             residual: hidden_states = Mixer(LN(residual))
         """
-        fc_factor = 1
-        hidden_states = hidden_states +  self.dropout(fc_factor * self.mixer( self.norm(hidden_states), inference_params=inference_params, **mixer_kwargs))
-        hidden_states = hidden_states +  self.dropout(fc_factor * self.mlp(self.norm2(hidden_states)))
+
+        hidden_states = hidden_states +  self.dropout(self.fc_factor * self.mixer( self.norm(hidden_states), inference_params=inference_params, **mixer_kwargs))
+#        hidden_states = hidden_states +  self.dropout(self.fc_factor * self.mlp(self.norm2(hidden_states)))
         return hidden_states
 
-    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+  
