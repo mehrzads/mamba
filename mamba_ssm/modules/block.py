@@ -91,6 +91,43 @@ class Block(nn.Module):
         return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
 '''
+class SSMBlock(nn.Module):
+    def __init__(
+        self, dim, mixer_cls, norm_cls=nn.LayerNorm, drop_cls=nn.LayerNorm, fc_factor = 1
+    ):
+        """
+        Simple block wrapping a mixer class with LayerNorm/RMSNorm and residual connection"
+
+        This Block has a slightly different structure compared to a regular
+        prenorm Transformer block.
+        The standard block is: LN -> MHA/MLP -> Add.
+        [Ref: https://arxiv.org/abs/2002.04745]
+        Here we have: Add -> LN -> Mixer, returning both
+        the hidden_states (output of the mixer) and the residual.
+        This is purely for performance reasons, as we can fuse add and LayerNorm.
+        The residual needs to be provided (except for the very first block).
+        """
+        super().__init__()       
+        self.fc_factor = fc_factor
+        self.norm = norm_cls(dim)
+        self.mixer = mixer_cls(dim)
+        self.dropout = drop_cls
+
+       
+
+    def forward(
+            self, hidden_states: Tensor,  inference_params=None, **mixer_kwargs
+    ):
+        r"""Pass the input through the encoder layer.
+
+        Args:
+            hidden_states: the sequence to the encoder layer (required).
+            residual: hidden_states = Mixer(LN(residual))
+        """
+
+        hidden_states = hidden_states +  self.dropout(self.fc_factor * self.mixer( self.norm(hidden_states), inference_params=inference_params, **mixer_kwargs))
+        return hidden_states
+
 class Block(nn.Module):
     def __init__(
         self, dim, mixer_cls, mlp_cls, norm_cls=nn.LayerNorm, drop_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False, fc_factor = 1
@@ -128,7 +165,7 @@ class Block(nn.Module):
         """
 
         hidden_states = hidden_states +  self.dropout(self.fc_factor * self.mixer( self.norm(hidden_states), inference_params=inference_params, **mixer_kwargs))
-#        hidden_states = hidden_states +  self.dropout(self.fc_factor * self.mlp(self.norm2(hidden_states)))
+        hidden_states = hidden_states +  self.dropout(self.fc_factor * self.mlp(self.norm2(hidden_states)))
         return hidden_states
 
   
