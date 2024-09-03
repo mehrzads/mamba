@@ -58,7 +58,7 @@ def create_ssmblock(
         if ssm_layer not in ["Mamba1", "Mamba2", "MambaVision"]:
             raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1, Mamba2, and MambaVision ")
         mixer_cls = partial(
-            Mamba2 if ssm_layer == "Mamba2" else  Mamba if ssm_layer == "Mamba" else MambaVision,
+            Mamba2 if ssm_layer == "Mamba2" else  Mamba if ssm_layer == "Mamba1" else MambaVision,
             layer_idx=layer_idx,
             **ssm_cfg,
             **factory_kwargs

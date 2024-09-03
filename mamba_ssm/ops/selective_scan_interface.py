@@ -80,16 +80,17 @@ class SelectiveScanFn(torch.autograd.Function):
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                     return_last_state=False):
+                     return_last_state=False, initial_state=None):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
     not considered in the backward pass.
     """
     return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
+    #return selective_scan_ref(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, initial_state)
 
 
 def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                      return_last_state=False):
+                      return_last_state=False, initial_state = None):
     """
     u: r(B D L)
     delta: r(B D L)
@@ -121,7 +122,10 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
     else:
         B = B.float()
         C = C.float()
-    x = A.new_zeros((batch, dim, dstate))
+    if initial_state is not None:
+        x = initial_state
+    else:
+        x = A.new_zeros((batch, dim, dstate))
     ys = []
     deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
     if not is_variable_B:
@@ -144,7 +148,7 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
                 y = torch.einsum('bdn,bn->bd', x, C[:, :, i])
             else:
                 y = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
-        if i == u.shape[2] - 1:
+        if i == u.shape[2] - 6:
             last_state = x
         if y.is_complex():
             y = y.real * 2

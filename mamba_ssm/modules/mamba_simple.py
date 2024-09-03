@@ -324,6 +324,7 @@ class MambaVision(nn.Module):
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
         self.use_fast_path = use_fast_path
         self.layer_idx = layer_idx
+        self.cache = None
         self.in_proj = nn.Linear(self.d_model, self.d_inner, bias=bias, **factory_kwargs)    
         self.x_proj = nn.Linear(
             self.d_inner//2, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs
@@ -388,7 +389,7 @@ class MambaVision(nn.Module):
         dt = rearrange(self.dt_proj(dt), "(b l) d -> b d l", l=seqlen)
         B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
         C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
-        y = selective_scan_fn(x,
+        y, last_state = selective_scan_fn(x,
                               dt,
                               A,
                               B,
@@ -397,8 +398,9 @@ class MambaVision(nn.Module):
                               z=None,
                               delta_bias=self.dt_proj.bias.float(),
                               delta_softplus=True,
-                              return_last_state=None)
-
+                              return_last_state=True,
+                              initial_state= self.cache  )
+        self.cache = last_state
         y = torch.cat([y, z], dim=1)
         y = rearrange(y, "b d l -> b l d")
         out = self.out_proj(y)
