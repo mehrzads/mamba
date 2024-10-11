@@ -148,7 +148,7 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
                 y = torch.einsum('bdn,bn->bd', x, C[:, :, i])
             else:
                 y = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
-        if i == u.shape[2] - 6:
+        if i == u.shape[2] - 1:
             last_state = x
         if y.is_complex():
             y = y.real * 2

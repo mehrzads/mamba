@@ -54,6 +54,7 @@ class Mamba(nn.Module):
         self.d_state = d_state
         self.d_conv = d_conv
         self.expand = expand
+        self.cache = None
         self.d_inner = int(self.expand * self.d_model)
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
         self.use_fast_path = use_fast_path
@@ -186,7 +187,7 @@ class Mamba(nn.Module):
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             assert self.activation in ["silu", "swish"]
-            y = selective_scan_fn(
+            y, last_state = selective_scan_fn(
                 x,
                 dt,
                 A,
@@ -196,8 +197,10 @@ class Mamba(nn.Module):
                 z=z,
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
-                return_last_state=ssm_state is not None,
+                return_last_state= True,
+                initial_state= self.cache
             )
+            self.cache = last_state  
             if ssm_state is not None:
                 y, last_state = y
                 ssm_state.copy_(last_state)
