@@ -54,7 +54,6 @@ class Mamba(nn.Module):
         self.d_state = d_state
         self.d_conv = d_conv
         self.expand = expand
-        self.cache = None
         self.d_inner = int(self.expand * self.d_model)
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
         self.use_fast_path = use_fast_path
@@ -117,20 +116,20 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
-    def forward(self, hidden_states, inference_params=None):
+    def forward(self, hidden_states, inference_params=None, cache_ssm=None, cache_conv=None):
         """
         hidden_states: (B, L, D)
         Returns: same shape as hidden_states
         """
         batch, seqlen, dim = hidden_states.shape
 
-        conv_state, ssm_state = None, None
-        if inference_params is not None:
-            conv_state, ssm_state = self._get_states_from_cache(inference_params, batch)
-            if inference_params.seqlen_offset > 0:
+        #conv_state, ssm_state = None, None
+        #if inference_params is not None:
+        #    conv_state, ssm_state = self._get_states_from_cache(inference_params, batch)
+        #    if inference_params.seqlen_offset > 0:
                 # The states are updated inplace
-                out, _, _ = self.step(hidden_states, conv_state, ssm_state)
-                return out
+        #        out, _, _ = self.step(hidden_states, conv_state, ssm_state)
+        #        return out
 
         # We do matmul and transpose BLH -> HBL at the same time
         xz = rearrange(
@@ -143,7 +142,7 @@ class Mamba(nn.Module):
 
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
-        if self.use_fast_path and causal_conv1d_fn is not None and inference_params is None:  # Doesn't support outputting the states
+        if self.use_fast_path and causal_conv1d_fn is not None and inference_params is None and cache_ssm is None:  # Doesn't support outputting the states
             out = mamba_inner_fn(
                 xz,
                 self.conv1d.weight,
@@ -162,20 +161,30 @@ class Mamba(nn.Module):
         else:
             x, z = xz.chunk(2, dim=1)
             # Compute short convolution
-            if conv_state is not None:
+            #if cache_conv is not None:
                 # If we just take x[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
                 # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
-                conv_state.copy_(F.pad(x, (self.d_conv - x.shape[-1], 0)))  # Update state (B D W)
             if causal_conv1d_fn is None:
                 x = self.act(self.conv1d(x)[..., :seqlen])
             else:
                 assert self.activation in ["silu", "swish"]
-                x = causal_conv1d_fn(
-                    x=x,
-                    weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
-                    bias=self.conv1d.bias,
-                    activation=self.activation,
-                )
+                if cache_conv is not None:
+                    cache_conv_copy = (F.pad(x, (self.d_conv - x.shape[-1], 0)))  # Update state (B D W)
+                    x = causal_conv1d_update(
+                        x,
+                        cache_conv,
+                        rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                        self.conv1d.bias,
+                        self.activation,
+                    )
+                    cache_conv = cache_conv_copy
+                else:
+                    x = causal_conv1d_fn(
+                        x=x,
+                        weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                        bias=self.conv1d.bias,
+                        activation=self.activation,
+                    )
 
             # We're careful here about the layout, to avoid extra transposes.
             # We want dt to have d as the slowest moving dimension
@@ -187,7 +196,7 @@ class Mamba(nn.Module):
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             assert self.activation in ["silu", "swish"]
-            y, last_state = selective_scan_fn(
+            y = selective_scan_fn(
                 x,
                 dt,
                 A,
@@ -198,15 +207,15 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 return_last_state= True,
-                initial_state= self.cache
+                initial_state= cache_ssm
             )
-            self.cache = last_state  
-            if ssm_state is not None:
-                y, last_state = y
-                ssm_state.copy_(last_state)
+            
+            if cache_ssm is not None:
+                y, cache_ssm = y
+            #    ssm_state.copy_(cache_ssm)
             y = rearrange(y, "b d l -> b l d")
             out = self.out_proj(y)
-        return out
+        return out, cache_ssm, cache_conv
 
     def step(self, hidden_states, conv_state, ssm_state):
         dtype = hidden_states.dtype
@@ -327,7 +336,6 @@ class MambaVision(nn.Module):
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
         self.use_fast_path = use_fast_path
         self.layer_idx = layer_idx
-        self.cache = None
         self.in_proj = nn.Linear(self.d_model, self.d_inner, bias=bias, **factory_kwargs)    
         self.x_proj = nn.Linear(
             self.d_inner//2, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs
@@ -375,7 +383,7 @@ class MambaVision(nn.Module):
             groups=self.d_inner//2,
             **factory_kwargs,
         )
-    def forward(self, hidden_states, inference_params=None):
+    def forward(self, hidden_states, cache_ssm=None, inference_params=None):
         """
         hidden_states: (B, L, D)
         Returns: same shape as hidden_states
@@ -392,7 +400,7 @@ class MambaVision(nn.Module):
         dt = rearrange(self.dt_proj(dt), "(b l) d -> b d l", l=seqlen)
         B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
         C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
-        y, last_state = selective_scan_fn(x,
+        y, cache_ssm = selective_scan_fn(x,
                               dt,
                               A,
                               B,
@@ -402,8 +410,7 @@ class MambaVision(nn.Module):
                               delta_bias=self.dt_proj.bias.float(),
                               delta_softplus=True,
                               return_last_state=True,
-                              initial_state= self.cache  )
-        self.cache = last_state
+                              initial_state= cache_ssm  )
         y = torch.cat([y, z], dim=1)
         y = rearrange(y, "b d l -> b l d")
         out = self.out_proj(y)

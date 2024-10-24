@@ -116,7 +116,7 @@ class SSMBlock(nn.Module):
        
 
     def forward(
-            self, hidden_states: Tensor,  inference_params=None, **mixer_kwargs
+            self, hidden_states: Tensor,  inference_params=None, cache_ssm=None, cache_conv=None, **mixer_kwargs
     ):
         r"""Pass the input through the encoder layer.
 
@@ -124,9 +124,9 @@ class SSMBlock(nn.Module):
             hidden_states: the sequence to the encoder layer (required).
             residual: hidden_states = Mixer(LN(residual))
         """
-
-        hidden_states = hidden_states +  self.dropout(self.fc_factor * self.mixer( self.norm(hidden_states), inference_params=inference_params, **mixer_kwargs))
-        return hidden_states
+        mixer_out, cache_ssm, cache_conv = self.mixer( self.norm(hidden_states), inference_params=inference_params, cache_ssm=cache_ssm, cache_conv=cache_conv, **mixer_kwargs)
+        hidden_states = hidden_states +  self.dropout(self.fc_factor * mixer_out)
+        return hidden_states, cache_ssm, cache_conv
 
 class Block(nn.Module):
     def __init__(
