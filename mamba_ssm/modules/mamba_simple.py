@@ -383,7 +383,7 @@ class MambaVision(nn.Module):
             groups=self.d_inner//2,
             **factory_kwargs,
         )
-    def forward(self, hidden_states, cache_ssm=None, inference_params=None):
+    def forward(self, hidden_states,  inference_params=None, cache_ssm=None, cache_conv=None):
         """
         hidden_states: (B, L, D)
         Returns: same shape as hidden_states
@@ -400,7 +400,7 @@ class MambaVision(nn.Module):
         dt = rearrange(self.dt_proj(dt), "(b l) d -> b d l", l=seqlen)
         B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
         C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
-        y, cache_ssm = selective_scan_fn(x,
+        y = selective_scan_fn(x,
                               dt,
                               A,
                               B,
@@ -415,6 +415,6 @@ class MambaVision(nn.Module):
         y = rearrange(y, "b d l -> b l d")
         out = self.out_proj(y)
 
-        return out
+        return out, None, None
 
    
