@@ -400,7 +400,7 @@ class MambaVision(nn.Module):
         dt = rearrange(self.dt_proj(dt), "(b l) d -> b d l", l=seqlen)
         B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
         C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
-        y = selective_scan_fn(x,
+        y, cache_ssm = selective_scan_fn(x,
                               dt,
                               A,
                               B,
