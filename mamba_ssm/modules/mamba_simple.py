@@ -27,6 +27,7 @@ try:
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
+from typing import Union
 
 class Mamba(nn.Module):
     def __init__(
@@ -35,6 +36,7 @@ class Mamba(nn.Module):
         d_state=16,
         d_conv=4,
         expand=2,
+        causal = True,
         dt_rank="auto",
         dt_min=0.001,
         dt_max=0.1,
@@ -304,7 +306,8 @@ class Mamba(nn.Module):
                 conv_state.zero_()
                 ssm_state.zero_()
         return conv_state, ssm_state
-        
+
+
 
 class MambaVision(nn.Module):
     def __init__(
@@ -313,6 +316,7 @@ class MambaVision(nn.Module):
         d_state=16,
         d_conv=4,
         expand=2,
+        causal = True,
         dt_rank="auto",
         dt_min=0.001,
         dt_max=0.1,
@@ -340,6 +344,7 @@ class MambaVision(nn.Module):
         self.x_proj = nn.Linear(
             self.d_inner//2, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs
         )
+        self.activation = "silu"
         self.dt_proj = nn.Linear(self.dt_rank, self.d_inner//2, bias=True, **factory_kwargs)
         dt_init_std = self.dt_rank**-0.5 * dt_scale
         if dt_init == "constant":
@@ -367,6 +372,7 @@ class MambaVision(nn.Module):
         self.D = nn.Parameter(torch.ones(self.d_inner//2, device=device))
         self.D._no_weight_decay = True
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
+        self.causal = causal
         self.conv1d_x = nn.Conv1d(
             in_channels=self.d_inner//2,
             out_channels=self.d_inner//2,
@@ -393,8 +399,45 @@ class MambaVision(nn.Module):
         xz = rearrange(xz, "b l d -> b d l")
         x, z = xz.chunk(2, dim=1)
         A = -torch.exp(self.A_log.float())
-        x = F.silu(F.conv1d(input=x, weight=self.conv1d_x.weight, bias=self.conv1d_x.bias, padding='same', groups=self.d_inner//2))
-        z = F.silu(F.conv1d(input=z, weight=self.conv1d_z.weight, bias=self.conv1d_z.bias, padding='same', groups=self.d_inner//2))
+        if self.causal:            
+            if cache_conv is not None:
+                    split_point = self.d_inner // 2
+                    cache_conv_x = cache_conv[:, :split_point, :]
+                    cache_conv_z = cache_conv[:, split_point:, :]
+                    cache_conv_copy_x = (F.pad(x, (self.d_conv - x.shape[-1], 0)))  # Update state (B D W)
+                    x = causal_conv1d_update(
+                        x,
+                        cache_conv_x,
+                        rearrange(self.conv1d_x.weight, "d 1 w -> d w"),
+                        self.conv1d_x.bias,
+                        self.activation,
+                    )
+                    cache_conv_copy_z = (F.pad(z, (self.d_conv - z.shape[-1], 0)))  # Update state (B D W)
+                    z = causal_conv1d_update(
+                        z,
+                        cache_conv_z,
+                        rearrange(self.conv1d_z.weight, "d 1 w -> d w"),
+                        self.conv1d_z.bias,
+                        self.activation,
+                    )
+                    cache_conv = torch.cat([cache_conv_copy_x, cache_conv_copy_z], axis=1)
+                    cache_ssm=cache_ssm[:, :split_point, :]
+            else:
+                    x = causal_conv1d_fn(
+                        x=x,
+                        weight=rearrange(self.conv1d_x.weight, "d 1 w -> d w"),
+                        bias=self.conv1d_x.bias,
+                        activation=self.activation,
+                    )
+                    z = causal_conv1d_fn(
+                        x=z,
+                        weight=rearrange(self.conv1d_z.weight, "d 1 w -> d w"),
+                        bias=self.conv1d_z.bias,
+                        activation=self.activation,
+                    )
+        else:
+            x = F.silu(F.conv1d(input=x, weight=self.conv1d_x.weight, bias=self.conv1d_x.bias, padding='same', groups=self.d_inner//2))
+            z = F.silu(F.conv1d(input=z, weight=self.conv1d_z.weight, bias=self.conv1d_z.bias, padding='same', groups=self.d_inner//2))
         x_dbl = self.x_proj(rearrange(x, "b d l -> (b l) d"))
         dt, B, C = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
         dt = rearrange(self.dt_proj(dt), "(b l) d -> b d l", l=seqlen)
@@ -409,12 +452,12 @@ class MambaVision(nn.Module):
                               z=None,
                               delta_bias=self.dt_proj.bias.float(),
                               delta_softplus=True,
-                              return_last_state=True,
+                              return_last_state=False,
                               initial_state= cache_ssm  )
         y = torch.cat([y, z], dim=1)
         y = rearrange(y, "b d l -> b l d")
         out = self.out_proj(y)
 
-        return out, None, None
+        return out, cache_ssm, cache_conv
 
    
